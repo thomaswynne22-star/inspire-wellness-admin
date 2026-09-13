@@ -1,0 +1,432 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="robots" content="noindex, nofollow">
+<title>Inspire Wellness — App Analytics</title>
+<!--
+  Admin-only. Nothing in index.html links here — reaching this page at
+  all requires knowing the URL, and reaching any data on it requires
+  signing in with a Supabase email/password account whose email is on
+  the `admins` allow-list (supabase/migrations/0002_analytics.sql). A
+  signed-in non-admin sees an "access denied" state, not a blank-but-
+  present dashboard — the RPCs this page calls raise an error server-side
+  for anyone is_admin() doesn't approve, so there's no client-side check
+  to bypass.
+
+  Setup, once per project:
+    1. Run supabase/migrations/0002_analytics.sql in the SQL Editor.
+    2. Add yourself:  insert into public.admins (email) values ('you@example.com');
+    3. In Supabase Dashboard > Authentication > Users, create yourself a
+       real user with that same email + a password (or use "Invite").
+    4. Open this page, sign in with that email/password.
+-->
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<style>
+  .viz-root{
+    color-scheme: light;
+    --surface-1:      #fcfcfb;
+    --surface-2:      #f9f9f7;
+    --text-primary:   #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted:     #898781;
+    --grid-line:      #e1e0d9;
+    --axis-line:      #c3c2b7;
+    --border:         rgba(11,11,11,0.10);
+    --series-1:       #2a78d6; /* App logins */
+    --series-2:       #eb6834; /* Purchases */
+    --accent:         #004E47; /* brand green, UI chrome only — never data */
+    --accent-soft:    #e7efed;
+    --danger:         #d03b3b;
+  }
+  @media (prefers-color-scheme: dark){
+    :root:where(:not([data-theme="light"])) .viz-root{
+      color-scheme: dark;
+      --surface-1:      #1a1a19;
+      --surface-2:      #0d0d0d;
+      --text-primary:   #ffffff;
+      --text-secondary: #c3c2b7;
+      --text-muted:     #898781;
+      --grid-line:      #2c2c2a;
+      --axis-line:      #383835;
+      --border:         rgba(255,255,255,0.10);
+      --series-1:       #3987e5;
+      --series-2:       #d95926;
+      --accent:         #3fa89e;
+      --accent-soft:    #10201e;
+      --danger:         #e66767;
+    }
+  }
+  :root[data-theme="dark"] .viz-root{
+    color-scheme: dark;
+    --surface-1:      #1a1a19;
+    --surface-2:      #0d0d0d;
+    --text-primary:   #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted:     #898781;
+    --grid-line:      #2c2c2a;
+    --axis-line:      #383835;
+    --border:         rgba(255,255,255,0.10);
+    --series-1:       #3987e5;
+    --series-2:       #d95926;
+    --accent:         #3fa89e;
+    --accent-soft:    #10201e;
+    --danger:         #e66767;
+  }
+
+  *{box-sizing:border-box;}
+  body{margin:0;}
+  .viz-root{
+    background:var(--surface-2);
+    color:var(--text-primary);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    min-height:100vh;
+    padding:32px 20px 80px;
+  }
+  .wrap{max-width:980px; margin:0 auto;}
+  h1{font-size:22px; margin:0 0 4px;}
+  .subtitle{color:var(--text-secondary); font-size:14px; margin:0 0 28px;}
+
+  /* ---- login gate ---- */
+  .login-card{
+    max-width:360px; margin:80px auto; background:var(--surface-1);
+    border:1px solid var(--border); border-radius:12px; padding:28px;
+  }
+  .login-card h1{font-size:18px;}
+  .field{margin-bottom:14px;}
+  .field label{display:block; font-size:13px; color:var(--text-secondary); margin-bottom:6px;}
+  .field input{
+    width:100%; padding:9px 11px; border-radius:8px; border:1px solid var(--border);
+    background:var(--surface-2); color:var(--text-primary); font-size:14px;
+  }
+  .btn{
+    display:inline-flex; align-items:center; justify-content:center; gap:6px;
+    background:var(--accent); color:#fff; border:none; border-radius:8px;
+    padding:10px 16px; font-size:14px; font-weight:600; cursor:pointer;
+  }
+  .btn:disabled{opacity:0.6; cursor:default;}
+  .btn-ghost{background:transparent; color:var(--text-secondary); border:1px solid var(--border);}
+  .error-msg{color:var(--danger); font-size:13px; margin-top:10px; min-height:16px;}
+
+  /* ---- dashboard chrome ---- */
+  .topbar{display:flex; align-items:center; justify-content:space-between; margin-bottom:24px;}
+  .denied{max-width:420px; margin:80px auto; text-align:center; color:var(--text-secondary);}
+
+  /* ---- stat tiles ---- */
+  .tiles{
+    display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px;
+    margin-bottom:28px;
+  }
+  .tile{
+    background:var(--surface-1); border:1px solid var(--border); border-radius:10px;
+    padding:14px 16px;
+  }
+  .tile .label{font-size:12px; color:var(--text-secondary); margin-bottom:6px;}
+  .tile .value{font-size:24px; font-weight:700; font-variant-numeric: tabular-nums;}
+  .tile .sub{font-size:11.5px; color:var(--text-muted); margin-top:4px;}
+
+  /* ---- chart card ---- */
+  .card{
+    background:var(--surface-1); border:1px solid var(--border); border-radius:12px;
+    padding:20px; margin-bottom:24px;
+  }
+  .card h2{font-size:15px; margin:0 0 2px;}
+  .card .card-sub{font-size:12.5px; color:var(--text-secondary); margin:0 0 14px;}
+  .legend{display:flex; gap:16px; margin-bottom:10px;}
+  .legend-item{display:flex; align-items:center; gap:6px; font-size:12.5px; color:var(--text-secondary);}
+  .legend-dot{width:10px; height:10px; border-radius:50%;}
+  .chart-wrap{position:relative;}
+  svg.chart{width:100%; height:auto; display:block; overflow:visible;}
+  .gridline{stroke:var(--grid-line); stroke-width:1;}
+  .axis-line{stroke:var(--axis-line); stroke-width:1;}
+  .axis-label{fill:var(--text-muted); font-size:10.5px;}
+  .series-line{fill:none; stroke-width:2; stroke-linecap:round; stroke-linejoin:round;}
+  .hover-dot{r:4; stroke:var(--surface-1); stroke-width:2;}
+  .crosshair{stroke:var(--axis-line); stroke-width:1; stroke-dasharray:3 3;}
+  .tooltip{
+    position:absolute; pointer-events:none; background:var(--surface-1);
+    border:1px solid var(--border); border-radius:8px; padding:8px 10px;
+    font-size:12px; color:var(--text-primary); box-shadow:0 4px 14px rgba(0,0,0,0.12);
+    white-space:nowrap; opacity:0; transition:opacity 0.1s; z-index:10;
+  }
+  .tooltip .t-date{font-weight:600; margin-bottom:4px;}
+  .tooltip .t-row{display:flex; align-items:center; gap:6px; font-size:11.5px; color:var(--text-secondary);}
+  .tooltip .t-dot{width:8px; height:8px; border-radius:50%;}
+
+  /* ---- table ---- */
+  .table-scroll{overflow-x:auto;}
+  table{width:100%; border-collapse:collapse; font-size:13px;}
+  th, td{text-align:right; padding:8px 10px; border-bottom:1px solid var(--grid-line); font-variant-numeric: tabular-nums;}
+  th:first-child, td:first-child{text-align:left; font-variant-numeric:normal;}
+  th{color:var(--text-secondary); font-weight:600; font-size:11.5px; text-transform:uppercase; letter-spacing:0.03em;}
+  tbody tr:hover{background:var(--surface-2);}
+  .empty-note{color:var(--text-muted); font-size:13px; padding:20px 0; text-align:center;}
+</style>
+</head>
+<body>
+<div class="viz-root">
+  <div id="loginView" class="login-card">
+    <h1>Admin sign in</h1>
+    <div class="field">
+      <label for="loginEmail">Email</label>
+      <input type="email" id="loginEmail" autocomplete="username">
+    </div>
+    <div class="field">
+      <label for="loginPassword">Password</label>
+      <input type="password" id="loginPassword" autocomplete="current-password">
+    </div>
+    <button class="btn" id="loginBtn" style="width:100%;">Sign in</button>
+    <div class="error-msg" id="loginError"></div>
+  </div>
+
+  <div id="deniedView" class="denied" style="display:none;">
+    <h1>Not authorized</h1>
+    <p>This account isn't on the admin list for this dashboard.</p>
+    <button class="btn btn-ghost" id="signOutFromDenied">Sign out</button>
+  </div>
+
+  <div id="dashboardView" class="wrap" style="display:none;">
+    <div class="topbar">
+      <div>
+        <h1>App analytics</h1>
+        <p class="subtitle">App opens, outbound clicks, and purchases attributed back to the Inspire app.</p>
+      </div>
+      <button class="btn btn-ghost" id="signOutBtn">Sign out</button>
+    </div>
+
+    <div class="tiles" id="tiles"></div>
+
+    <div class="card">
+      <h2>App logins vs. purchases</h2>
+      <p class="card-sub">Last 30 days. Hover to see a day's exact numbers.</p>
+      <div class="legend">
+        <span class="legend-item"><span class="legend-dot" style="background:var(--series-1);"></span>App logins</span>
+        <span class="legend-item"><span class="legend-dot" style="background:var(--series-2);"></span>Purchases</span>
+      </div>
+      <div class="chart-wrap" id="chartWrap"></div>
+    </div>
+
+    <div class="card">
+      <h2>Daily breakdown</h2>
+      <p class="card-sub">Same data as the chart above, as a table.</p>
+      <div class="table-scroll" id="tableWrap"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const SUPABASE_URL = 'https://jdyuebyyqifgdmdfhttx.supabase.co';
+const SUPABASE_ANON_KEY = 'sb_publishable__h6aVy2u1tEdNqvvXSx4lQ_BWVJAVnp';
+const client = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+const loginView = document.getElementById('loginView');
+const deniedView = document.getElementById('deniedView');
+const dashboardView = document.getElementById('dashboardView');
+const loginError = document.getElementById('loginError');
+
+function showView(view){
+  loginView.style.display = view === 'login' ? 'block' : 'none';
+  deniedView.style.display = view === 'denied' ? 'block' : 'none';
+  dashboardView.style.display = view === 'dashboard' ? 'block' : 'none';
+}
+
+document.getElementById('loginBtn').addEventListener('click', async ()=>{
+  const email = document.getElementById('loginEmail').value.trim();
+  const password = document.getElementById('loginPassword').value;
+  loginError.textContent = '';
+  if(!email || !password){ loginError.textContent = 'Enter your email and password.'; return; }
+  const btn = document.getElementById('loginBtn');
+  btn.disabled = true; btn.textContent = 'Signing in…';
+  const {error} = await client.auth.signInWithPassword({email, password});
+  btn.disabled = false; btn.textContent = 'Sign in';
+  if(error){ loginError.textContent = error.message; return; }
+  await boot();
+});
+
+async function signOut(){
+  await client.auth.signOut();
+  showView('login');
+}
+document.getElementById('signOutBtn').addEventListener('click', signOut);
+document.getElementById('signOutFromDenied').addEventListener('click', signOut);
+
+function fmtInt(n){ return Number(n||0).toLocaleString(); }
+function fmtPct(n){ return (Number(n||0)*100).toFixed(1) + '%'; }
+function fmtMoney(n){ return '$' + Number(n||0).toLocaleString(undefined,{minimumFractionDigits:2, maximumFractionDigits:2}); }
+function fmtDate(d){
+  const dt = new Date(d + 'T00:00:00');
+  return dt.toLocaleDateString(undefined, {month:'short', day:'numeric'});
+}
+
+function renderTiles(totals){
+  const appSessions = totals.total_app_sessions || 0;
+  const purchases = totals.total_purchases || 0;
+  const clicks = totals.total_clicks || 0;
+  const convRate = appSessions ? purchases / appSessions : 0;
+  const clickRate = clicks ? purchases / clicks : 0;
+
+  const tiles = [
+    {label:'App logins', value: fmtInt(appSessions)},
+    {label:'Unique visitors', value: fmtInt(totals.unique_visitors)},
+    {label:'Outbound clicks', value: fmtInt(clicks)},
+    {label:'Purchases', value: fmtInt(purchases)},
+    {label:'Revenue attributed', value: fmtMoney(totals.total_revenue)},
+    {label:'Login → purchase rate', value: fmtPct(convRate), sub: purchases + ' of ' + appSessions + ' logins'},
+    {label:'Click → purchase rate', value: fmtPct(clickRate), sub: purchases + ' of ' + clicks + ' clicks'},
+  ];
+  document.getElementById('tiles').innerHTML = tiles.map(t=>`
+    <div class="tile">
+      <div class="label">${t.label}</div>
+      <div class="value">${t.value}</div>
+      ${t.sub ? `<div class="sub">${t.sub}</div>` : ''}
+    </div>
+  `).join('');
+}
+
+function renderTable(rows){
+  if(!rows.length){
+    document.getElementById('tableWrap').innerHTML = '<div class="empty-note">No data yet.</div>';
+    return;
+  }
+  const body = rows.slice().reverse().map(r=>{
+    const rate = r.app_sessions ? r.purchases / r.app_sessions : 0;
+    return `<tr>
+      <td>${fmtDate(r.day)}</td>
+      <td>${fmtInt(r.app_sessions)}</td>
+      <td>${fmtInt(r.unique_visitors)}</td>
+      <td>${fmtInt(r.clicks)}</td>
+      <td>${fmtInt(r.purchases)}</td>
+      <td>${fmtPct(rate)}</td>
+      <td>${fmtMoney(r.revenue)}</td>
+    </tr>`;
+  }).join('');
+  document.getElementById('tableWrap').innerHTML = `
+    <table>
+      <thead><tr>
+        <th>Date</th><th>App logins</th><th>Unique visitors</th><th>Clicks</th>
+        <th>Purchases</th><th>Conv. rate</th><th>Revenue</th>
+      </tr></thead>
+      <tbody>${body}</tbody>
+    </table>
+  `;
+}
+
+function renderChart(rows){
+  const wrap = document.getElementById('chartWrap');
+  if(!rows.length){
+    wrap.innerHTML = '<div class="empty-note">No data yet.</div>';
+    return;
+  }
+
+  const W = 900, H = 260, padL = 34, padR = 12, padT = 12, padB = 26;
+  const plotW = W - padL - padR, plotH = H - padT - padB;
+
+  const maxLogins = Math.max(1, ...rows.map(r=>r.app_sessions));
+  const maxPurchases = Math.max(1, ...rows.map(r=>r.purchases));
+  // Both series share one axis (never dual-axis) — scaled to whichever is
+  // larger so both are readable on the same 0..max grid.
+  const maxVal = Math.max(maxLogins, maxPurchases, 1);
+
+  function x(i){ return padL + (rows.length===1 ? 0 : (i/(rows.length-1)) * plotW); }
+  function y(v){ return padT + plotH - (v/maxVal) * plotH; }
+
+  function linePath(key){
+    return rows.map((r,i)=> (i===0?'M':'L') + x(i).toFixed(1) + ',' + y(r[key]).toFixed(1)).join(' ');
+  }
+
+  const yTicks = 4;
+  const gridLines = Array.from({length: yTicks+1}, (_,i)=>{
+    const v = Math.round((maxVal/yTicks)*i);
+    const yy = y(v);
+    return `<line class="gridline" x1="${padL}" y1="${yy}" x2="${W-padR}" y2="${yy}"></line>
+            <text class="axis-label" x="${padL-6}" y="${yy+3}" text-anchor="end">${v}</text>`;
+  }).join('');
+
+  // Show at most ~6 date labels so they never collide on a 30-day range.
+  const labelEvery = Math.ceil(rows.length / 6);
+  const xLabels = rows.map((r,i)=> i % labelEvery === 0
+    ? `<text class="axis-label" x="${x(i)}" y="${H-6}" text-anchor="middle">${fmtDate(r.day)}</text>`
+    : ''
+  ).join('');
+
+  const svg = `
+    <svg class="chart" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" id="chartSvg">
+      ${gridLines}
+      <line class="axis-line" x1="${padL}" y1="${padT+plotH}" x2="${W-padR}" y2="${padT+plotH}"></line>
+      <path class="series-line" d="${linePath('app_sessions')}" stroke="var(--series-1)"></path>
+      <path class="series-line" d="${linePath('purchases')}" stroke="var(--series-2)"></path>
+      ${xLabels}
+      <line class="crosshair" id="crosshair" x1="0" y1="${padT}" x2="0" y2="${padT+plotH}" style="opacity:0;"></line>
+      <circle class="hover-dot" id="dot1" fill="var(--series-1)" style="opacity:0;"></circle>
+      <circle class="hover-dot" id="dot2" fill="var(--series-2)" style="opacity:0;"></circle>
+      <rect id="hoverTarget" x="${padL}" y="${padT}" width="${plotW}" height="${plotH}" fill="transparent"></rect>
+    </svg>
+    <div class="tooltip" id="tooltip"></div>
+  `;
+  wrap.innerHTML = svg;
+
+  const svgEl = document.getElementById('chartSvg');
+  const tooltip = document.getElementById('tooltip');
+  const crosshair = document.getElementById('crosshair');
+  const dot1 = document.getElementById('dot1');
+  const dot2 = document.getElementById('dot2');
+  const hoverTarget = document.getElementById('hoverTarget');
+
+  hoverTarget.addEventListener('mousemove', (e)=>{
+    const rect = svgEl.getBoundingClientRect();
+    const relX = ((e.clientX - rect.left) / rect.width) * W;
+    const i = Math.max(0, Math.min(rows.length-1, Math.round(((relX-padL)/plotW) * (rows.length-1))));
+    const r = rows[i];
+    const px = x(i);
+
+    crosshair.setAttribute('x1', px); crosshair.setAttribute('x2', px);
+    crosshair.style.opacity = 1;
+    dot1.setAttribute('cx', px); dot1.setAttribute('cy', y(r.app_sessions)); dot1.style.opacity = 1;
+    dot2.setAttribute('cx', px); dot2.setAttribute('cy', y(r.purchases)); dot2.style.opacity = 1;
+
+    tooltip.innerHTML = `
+      <div class="t-date">${fmtDate(r.day)}</div>
+      <div class="t-row"><span class="t-dot" style="background:var(--series-1);"></span>App logins: ${fmtInt(r.app_sessions)}</div>
+      <div class="t-row"><span class="t-dot" style="background:var(--series-2);"></span>Purchases: ${fmtInt(r.purchases)}</div>
+    `;
+    const pxRatio = rect.width / W;
+    let left = (px * pxRatio) + 12;
+    if(left + 150 > rect.width) left = (px * pxRatio) - 150;
+    tooltip.style.left = left + 'px';
+    tooltip.style.top = (y(Math.max(r.app_sessions, r.purchases)) * (rect.height/H)) - 46 + 'px';
+    tooltip.style.opacity = 1;
+  });
+  hoverTarget.addEventListener('mouseleave', ()=>{
+    tooltip.style.opacity = 0;
+    crosshair.style.opacity = 0;
+    dot1.style.opacity = 0;
+    dot2.style.opacity = 0;
+  });
+}
+
+async function boot(){
+  const {data: {session}} = await client.auth.getSession();
+  if(!session){ showView('login'); return; }
+
+  const [{data: totals, error: totalsErr}, {data: daily, error: dailyErr}] = await Promise.all([
+    client.rpc('admin_totals'),
+    client.rpc('admin_daily_stats', {days_back: 30}),
+  ]);
+
+  if(totalsErr || dailyErr){
+    showView('denied');
+    return;
+  }
+
+  const totalsRow = Array.isArray(totals) ? totals[0] : totals;
+  renderTiles(totalsRow || {});
+  renderChart(daily || []);
+  renderTable(daily || []);
+  showView('dashboard');
+}
+
+boot();
+</script>
+</body>
+</html>
